@@ -87,6 +87,10 @@ type ProtocolManager struct {
 	quitSync    chan struct{}
 	noMorePeers chan struct{}
 
+	lesServer LesServer
+
+	isStarted bool
+
 	// wait group is used for graceful shutdowns during downloading
 	// and processing
 	wg sync.WaitGroup
@@ -209,9 +213,16 @@ func (pm *ProtocolManager) Start() {
 	// start sync handlers
 	go pm.syncer()
 	go pm.txsyncLoop()
+
+	//set flag
+	pm.isStarted = true
 }
 
 func (pm *ProtocolManager) Stop() {
+	if !pm.isStarted {
+		return
+	}
+
 	log.Info("Stopping Ethereum protocol")
 
 	pm.txSub.Unsubscribe()         // quits txBroadcastLoop

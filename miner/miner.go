@@ -42,6 +42,10 @@ type Backend interface {
 	ChainDb() ethdb.Database
 }
 
+type Pending interface {
+	Pending() (*types.Block, *state.StateDB)
+}
+
 // Miner creates blocks and searches for proof-of-work values.
 type Miner struct {
 	mux *event.TypeMux
