@@ -238,7 +238,7 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 		to:         tx.data.Recipient,
 		amount:     tx.data.Amount,
 		data:       tx.data.Payload,
-		checkNonce: true,
+		checkNonce: false,
 	}
 
 	var err error
