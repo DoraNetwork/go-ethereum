@@ -92,7 +92,7 @@ var (
 
 	// General tx metrics
 	invalidTxCounter     = metrics.NewCounter("txpool/invalid")
-	underpricedTxCounter = metrics.NewCounter("txpool/underpriced")
+	//underpricedTxCounter = metrics.NewCounter("txpool/underpriced")
 )
 
 type stateFn func() (*state.StateDB, error)
@@ -119,9 +119,9 @@ var DefaultTxPoolConfig = TxPoolConfig{
 	PriceBump:  10,
 
 	AccountSlots: 16,
-	GlobalSlots:  4096,
+	GlobalSlots:  32768,
 	AccountQueue: 64,
-	GlobalQueue:  1024,
+	GlobalQueue:  4096,
 
 	Lifetime: 3 * time.Hour,
 }
@@ -442,7 +442,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	// If the transaction pool is full, discard underpriced transactions
 	if uint64(len(pool.all)) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		log.Trace("Discarding transaction as there is no room for it", "hash", hash)
-		return false, fmt.Errorf("No global slot for transaction: %x", hash)
+		return false, fmt.Errorf("Discarding transaction as there is no room for it: %x", hash)
 	}
 	// If the transaction is replacing an already pending one, do directly
 	from, _ := types.Sender(pool.signer, tx) // already validated
