@@ -20,7 +20,6 @@ package common
 import (
 	"encoding/hex"
 	"math/big"
-	"fmt"
 	"github.com/ethereum/go-ethereum/common/math"
 )
 
