@@ -19,6 +19,9 @@ package common
 
 import (
 	"encoding/hex"
+	"math/big"
+	"fmt"
+	"github.com/ethereum/go-ethereum/common/math"
 )
 
 func ToHex(b []byte) string {
@@ -108,4 +111,20 @@ func LeftPadBytes(slice []byte, l int) []byte {
 	copy(padded[l-len(slice):], slice)
 
 	return padded
+}
+
+
+// getDataBig returns a slice from the data based on the start and size and pads
+// up to size with zero's. This function is overflow safe.
+func GetDataBig(data []byte, start *big.Int, size *big.Int) []byte {
+
+	dlen := big.NewInt(int64(len(data)))
+
+	s := math.BigMin(start, dlen)
+	e := math.BigMin(new(big.Int).Add(s, size), dlen)
+
+	fmt.Printf("getDataBig data=%#v, dlen=%#v, start=%#v, size=%#v, s=%#v, e=%#v\n", data, dlen, start, size, s, e)
+
+
+	return RightPadBytes(data[s.Uint64():e.Uint64()], int(size.Uint64()))
 }
