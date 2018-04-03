@@ -123,8 +123,5 @@ func GetDataBig(data []byte, start *big.Int, size *big.Int) []byte {
 	s := math.BigMin(start, dlen)
 	e := math.BigMin(new(big.Int).Add(s, size), dlen)
 
-	fmt.Printf("getDataBig data=%#v, dlen=%#v, start=%#v, size=%#v, s=%#v, e=%#v\n", data, dlen, start, size, s, e)
-
-
 	return RightPadBytes(data[s.Uint64():e.Uint64()], int(size.Uint64()))
 }
