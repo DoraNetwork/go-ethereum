@@ -29,6 +29,7 @@ import (
 
 // nonceHeap is a heap.Interface implementation over 64bit unsigned integers for
 // retrieving sorted transactions from the possibly gapped future queue.
+// nonceHeap是一个无符号整型数组，实现heap的相关接口
 type nonceHeap []uint64
 
 func (h nonceHeap) Len() int           { return len(h) }
@@ -39,6 +40,7 @@ func (h *nonceHeap) Push(x interface{}) {
 	*h = append(*h, x.(uint64))
 }
 
+// 返回最后一个元素
 func (h *nonceHeap) Pop() interface{} {
 	old := *h
 	n := len(old)
@@ -181,6 +183,8 @@ func (m *txSortedMap) Ready(start uint64) types.Transactions {
 		return nil
 	}
 	// Otherwise start accumulating incremental transactions
+	// 这里没有使用start，start之前的也一起返回
+	// TODO: 没太明白这里的逻辑
 	var ready types.Transactions
 	for next := (*m.index)[0]; m.index.Len() > 0 && (*m.index)[0] == next; next++ {
 		ready = append(ready, m.items[next])
@@ -253,6 +257,8 @@ func (l *txList) Add(tx *types.Transaction, priceBump uint64) (bool, *types.Tran
 	// If there's an older better transaction, abort
 	old := l.txs.Get(tx.Nonce())
 	if old != nil {
+		// TODO: 比较tx.GasPrice * 100 是否大于old.GasPrice * Int(100+int64(priceBump))
+		// 吹毛求疵的优化： 一次乘法替换一次除法
 		threshold := new(big.Int).Div(new(big.Int).Mul(old.GasPrice(), big.NewInt(100+int64(priceBump))), big.NewInt(100))
 		if threshold.Cmp(tx.GasPrice()) >= 0 {
 			return false, nil
@@ -297,6 +303,7 @@ func (l *txList) Filter(costLimit, gasLimit *big.Int) (types.Transactions, types
 	removed := l.txs.Filter(func(tx *types.Transaction) bool { return tx.Cost().Cmp(costLimit) > 0 || tx.Gas().Cmp(gasLimit) > 0 })
 
 	// If the list was strict, filter anything above the lowest nonce
+	// 由于是严格模式，nonce值最小的tx被删除了，大于该nonce值的都是非法的
 	var invalids types.Transactions
 	if l.strict && len(removed) > 0 {
 		lowest := uint64(math.MaxUint64)

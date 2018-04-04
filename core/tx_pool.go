@@ -157,7 +157,7 @@ type TxPool struct {
 	gasPrice     *big.Int
 	eventMux     *event.TypeMux
 	events       *event.TypeMuxSubscription
-	locals       *accountSet
+	//locals       *accountSet
 	signer       types.Signer
 	mu           sync.RWMutex
 
@@ -196,7 +196,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, eventMux *e
 		events:       eventMux.Subscribe(ChainHeadEvent{}, RemovedTransactionEvent{}),
 		quit:         make(chan struct{}),
 	}
-	pool.locals = newAccountSet(pool.signer)
+	//pool.locals = newAccountSet(pool.signer)
 	pool.resetState()
 
 	// Start the various events loops and return
@@ -394,10 +394,10 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrInvalidSender
 	}
 	// Drop non-local transactions under our own minimal accepted gas price
-	local = local || pool.locals.contains(from) // account may be local even if the transaction arrived from the network
-	if !local && pool.gasPrice.Cmp(tx.GasPrice()) > 0 {
-		return ErrUnderpriced
-	}
+	//local = local || pool.locals.contains(from) // account may be local even if the transaction arrived from the network
+	//if !local && pool.gasPrice.Cmp(tx.GasPrice()) > 0 {
+	//	return ErrUnderpriced
+	//}
 	// Ensure the transaction adheres to nonce ordering
 	currentState, err := pool.currentState()
 	if err != nil {
@@ -445,6 +445,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		return false, fmt.Errorf("Discarding transaction as there is no room for it: %x", hash)
 	}
 	// If the transaction is replacing an already pending one, do directly
+	// TODO: 如果Pending中有相同nonce的tx是否直接返回？？？
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, check if required price bump is met
@@ -468,9 +469,9 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if local {
-		pool.locals.add(from)
-	}
+	//if local {
+	//	pool.locals.add(from)
+	//}
 	log.Trace("Pooled new future transaction", "hash", hash, "from", from, "to", tx.To())
 	return replace, nil
 }
@@ -510,6 +511,7 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 	list := pool.pending[addr]
 
 	inserted, old := list.Add(tx, pool.config.PriceBump)
+	// 插入失败直接删除
 	if !inserted {
 		// An older transaction was better, discard this
 		delete(pool.all, hash)
@@ -518,6 +520,7 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 		return
 	}
 	// Otherwise discard any previous transaction and mark this
+	// 插入替换，删除旧的
 	if old != nil {
 		delete(pool.all, old.Hash())
 
@@ -566,12 +569,19 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
+	start := time.Now()
 	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
 	if err != nil {
 		return err
 	}
+	end := time.Now()
+	fmt.Printf("TxPool.addTx--add: %v\n", end.Sub(start).Nanoseconds()/1000000)
 	// If we added a new transaction, run promotion checks and return
+	// 如果是新增的tx，需要进行检查是否有可能提升txs
+	// 如果是替换的则什么都不做
+	// TODO: 如果替换的是Pending中的tx，这种tx如何处理，是否可以直接报错？
+
 	if !replace {
 		state, err := pool.currentState()
 		if err != nil {
@@ -579,6 +589,7 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 		}
 		from, _ := types.Sender(pool.signer, tx) // already validated
 		pool.promoteExecutables(state, []common.Address{from})
+		fmt.Printf("TxPool.addTx--promoteExecuables: %v\n", time.Now().Sub(start).Nanoseconds()/1000000)
 	}
 	return nil
 }
@@ -702,12 +713,14 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 			continue // Just in case someone calls with a non existing account
 		}
 		// Drop all transactions that are deemed too old (low nonce)
+		// 删除nonce值太低txs
 		for _, tx := range list.Forward(state.GetNonce(addr)) {
 			hash := tx.Hash()
 			log.Trace("Removed old queued transaction", "hash", hash)
 			delete(pool.all, hash)
 		}
 		// Drop all transactions that are too costly (low balance or out of gas)
+		// 删除花费太高的txs
 		drops, _ := list.Filter(state.GetBalance(addr), gaslimit)
 		for _, tx := range drops {
 			hash := tx.Hash()
@@ -716,26 +729,31 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 			queuedNofundsCounter.Inc(1)
 		}
 		// Gather all executable transactions and promote them
+		// TODO: 区分state与pendingState中的nonce值
 		for _, tx := range list.Ready(pool.pendingState.GetNonce(addr)) {
 			hash := tx.Hash()
 			log.Trace("Promoting queued transaction", "hash", hash)
 			pool.promoteTx(addr, hash, tx)
 		}
 		// Drop all transactions over the allowed limit
-		if !pool.locals.contains(addr) {
-			for _, tx := range list.Cap(int(pool.config.AccountQueue)) {
-				hash := tx.Hash()
-				delete(pool.all, hash)
-				queuedRateLimitCounter.Inc(1)
-				log.Trace("Removed cap-exceeding queued transaction", "hash", hash)
-			}
-		}
+		//if !pool.locals.contains(addr) {
+		//	for _, tx := range list.Cap(int(pool.config.AccountQueue)) {
+		//		hash := tx.Hash()
+		//		delete(pool.all, hash)
+		//		queuedRateLimitCounter.Inc(1)
+		//		log.Trace("Removed cap-exceeding queued transaction", "hash", hash)
+		//	}
+		//}
 		// Delete the entire queue entry if it became empty.
 		if list.Empty() {
 			delete(pool.queue, addr)
 		}
 	}
+
+	// ===== 提升之后对阈值的检查 =======
+	// TODO: 前面做了拦截，这里的两个逻辑是不是多余了？
 	// If the pending limit is overflown, start equalizing allowances
+	// 首先对pending的检查
 	pending := uint64(0)
 	for _, list := range pool.pending {
 		pending += uint64(list.Len())
@@ -744,12 +762,12 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 		pendingBeforeCap := pending
 		// Assemble a spam order to penalize large transactors first
 		spammers := prque.New()
-		for addr, list := range pool.pending {
-			// Only evict transactions from high rollers
-			if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.AccountSlots {
-				spammers.Push(addr, float32(list.Len()))
-			}
-		}
+		//for addr, list := range pool.pending {
+		//	// Only evict transactions from high rollers
+		//	if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.AccountSlots {
+		//		spammers.Push(addr, float32(list.Len()))
+		//	}
+		//}
 		// Gradually drop transactions from offenders
 		offenders := []common.Address{}
 		for pending > pool.config.GlobalSlots && !spammers.Empty() {
@@ -805,6 +823,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 		pendingRateLimitCounter.Inc(int64(pendingBeforeCap - pending))
 	}
 	// If we've queued more transactions than the hard limit, drop oldest ones
+	// 然后对future queue的检查
 	queued := uint64(0)
 	for _, list := range pool.queue {
 		queued += uint64(list.Len())
@@ -812,11 +831,11 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 	if queued > pool.config.GlobalQueue {
 		// Sort all accounts with queued transactions by heartbeat
 		addresses := make(addresssByHeartbeat, 0, len(pool.queue))
-		for addr := range pool.queue {
-			if !pool.locals.contains(addr) { // don't drop locals
-				addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
-			}
-		}
+		//for addr := range pool.queue {
+		//	if !pool.locals.contains(addr) { // don't drop locals
+		//		addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
+		//	}
+		//}
 		sort.Sort(addresses)
 
 		// Drop transactions until the total is below the limit or only locals remain
@@ -898,9 +917,10 @@ func (pool *TxPool) expirationLoop() {
 			pool.mu.Lock()
 			for addr := range pool.queue {
 				// Skip local transactions from the eviction mechanism
-				if pool.locals.contains(addr) {
-					continue
-				}
+				//if pool.locals.contains(addr) {
+				//	continue
+				//}
+				continue
 				// Any non-locals old enough should be removed
 				if time.Since(pool.beats[addr]) > pool.config.Lifetime {
 					for _, tx := range pool.queue[addr].Flatten() {
