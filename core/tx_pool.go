@@ -70,6 +70,10 @@ var (
 	// than some meaningful limit a user might use. This is not a consensus error
 	// making the transaction invalid, rather a DOS protection.
 	ErrOversizedData = errors.New("oversized data")
+
+	// ErrNonceNoReplace can not replace pending tx of the same nonce
+	// as pending tx has already been broadcast to tendermint
+	ErrNonceNotReplaced = errors.New("can not replace pending nonce")
 )
 
 var (
@@ -444,25 +448,11 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		log.Trace("Discarding transaction as there is no room for it", "hash", hash)
 		return false, fmt.Errorf("Discarding transaction as there is no room for it: %x", hash)
 	}
-	// If the transaction is replacing an already pending one, do directly
-	// TODO: 如果Pending中有相同nonce的tx是否直接返回？？？
+	// If the transaction is replacing an already pending one, return error
 	from, _ := types.Sender(pool.signer, tx) // already validated
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
-		// Nonce already pending, check if required price bump is met
-		inserted, old := list.Add(tx, pool.config.PriceBump)
-		if !inserted {
-			pendingDiscardCounter.Inc(1)
-			return false, ErrReplaceUnderpriced
-		}
-		// New transaction is better, replace old one
-		if old != nil {
-			delete(pool.all, old.Hash())
-			pendingReplaceCounter.Inc(1)
-		}
-		pool.all[tx.Hash()] = tx
-
-		log.Trace("Pooled new executable transaction", "hash", hash, "from", from, "to", tx.To())
-		return old != nil, nil
+		// Nonce already pending, can not be replaced
+		return false, ErrNonceNotReplaced
 	}
 	// New transaction isn't replacing a pending one, push into queue and potentially mark local
 	replace, err := pool.enqueueTx(hash, tx)
@@ -569,14 +559,11 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
-	start := time.Now()
 	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
 	if err != nil {
 		return err
 	}
-	end := time.Now()
-	fmt.Printf("TxPool.addTx--add: %v\n", end.Sub(start).Nanoseconds()/1000000)
 	// If we added a new transaction, run promotion checks and return
 	// 如果是新增的tx，需要进行检查是否有可能提升txs
 	// 如果是替换的则什么都不做
@@ -589,7 +576,6 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 		}
 		from, _ := types.Sender(pool.signer, tx) // already validated
 		pool.promoteExecutables(state, []common.Address{from})
-		fmt.Printf("TxPool.addTx--promoteExecuables: %v\n", time.Now().Sub(start).Nanoseconds()/1000000)
 	}
 	return nil
 }
