@@ -23,6 +23,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -32,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
 	"gopkg.in/karalabe/cookiejar.v2/collections/prque"
+	rpcClient "github.com/tendermint/tendermint/rpc/client"
 )
 
 var (
@@ -74,6 +76,8 @@ var (
 	// ErrNonceNoReplace can not replace pending tx of the same nonce
 	// as pending tx has already been broadcast to tendermint
 	ErrNonceNotReplaced = errors.New("can not replace pending nonce")
+	// ErrBroadcastTX error occured when broadcasting tx to tendermint
+	ErrBroadcastTX = errors.New("failed to broadcast tx to tendermint")
 )
 
 var (
@@ -175,6 +179,8 @@ type TxPool struct {
 	quit chan struct{}
 
 	homestead bool
+
+	tmClient *rpcClient.Local
 }
 
 // NewTxPool creates a new transaction pool to gather, sort and filter inbound
@@ -199,6 +205,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, eventMux *e
 		pendingState: nil,
 		events:       eventMux.Subscribe(ChainHeadEvent{}, RemovedTransactionEvent{}),
 		quit:         make(chan struct{}),
+		tmClient: 	  nil,
 	}
 	//pool.locals = newAccountSet(pool.signer)
 	pool.resetState()
@@ -493,7 +500,7 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 // promoteTx adds a transaction to the pending (processable) list of transactions.
 //
 // Note, this method assumes the pool lock is held!
-func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.Transaction) {
+func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.Transaction) error {
 	// Try to insert the transaction into the pending queue
 	if pool.pending[addr] == nil {
 		pool.pending[addr] = newTxList(true)
@@ -507,7 +514,7 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 		delete(pool.all, hash)
 
 		pendingDiscardCounter.Inc(1)
-		return
+		return nil
 	}
 	// Otherwise discard any previous transaction and mark this
 	// 插入替换，删除旧的
@@ -523,7 +530,12 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 	// Set the potentially new pending nonce and notify any subsystems of the new tx
 	pool.beats[addr] = time.Now()
 	pool.pendingState.SetNonce(addr, tx.Nonce()+1)
+
+	if pool.tmClient != nil {
+		return pool.broadcastTx(tx)
+	}
 	pool.eventMux.Post(TxPreEvent{tx})
+	return nil
 }
 
 // AddLocal enqueues a single transaction into the pool if it is valid, marking
@@ -575,7 +587,7 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 			return err
 		}
 		from, _ := types.Sender(pool.signer, tx) // already validated
-		pool.promoteExecutables(state, []common.Address{from})
+		return pool.promoteExecutables(state, []common.Address{from})
 	}
 	return nil
 }
@@ -682,7 +694,7 @@ func (pool *TxPool) removeTx(hash common.Hash) {
 // promoteExecutables moves transactions that have become processable from the
 // future queue to the set of pending transactions. During this process, all
 // invalidated transactions (low nonce, low balance) are deleted.
-func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.Address) {
+func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.Address) error {
 	gaslimit := pool.gasLimit()
 
 	// Gather all the accounts potentially needing updates
@@ -719,7 +731,11 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 		for _, tx := range list.Ready(pool.pendingState.GetNonce(addr)) {
 			hash := tx.Hash()
 			log.Trace("Promoting queued transaction", "hash", hash)
-			pool.promoteTx(addr, hash, tx)
+			// TODO: 剩余的tx怎么处理？？？
+			if err := pool.promoteTx(addr, hash, tx); err != nil {
+				return err
+			}
+
 		}
 		// Drop all transactions over the allowed limit
 		//if !pool.locals.contains(addr) {
@@ -849,6 +865,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 			}
 		}
 	}
+	return nil
 }
 
 // demoteUnexecutables removes invalid and processed transactions from the pools
@@ -920,6 +937,29 @@ func (pool *TxPool) expirationLoop() {
 			return
 		}
 	}
+}
+
+func (pool *TxPool) SetTMClient(client *rpcClient.Local) {
+	pool.tmClient = client
+}
+
+func (pool *TxPool) broadcastTx(tx *types.Transaction) error {
+	buf := new(bytes.Buffer)
+	if err := tx.EncodeRLP(buf); err != nil {
+		return err
+	}
+	result, err := pool.tmClient.BroadcastTxSync(buf.Bytes())
+	if err != nil {
+		log.Trace("Broadcast error", "err", err)
+		return ErrBroadcastTX
+	}
+
+	if result.Code != uint32(0) {
+		pool.removeTx(tx.Hash())
+		fmt.Println(result)
+		return errors.New(result.Log)
+	}
+	return nil
 }
 
 // addressByHeartbeat is an account address tagged with its last activity timestamp.
