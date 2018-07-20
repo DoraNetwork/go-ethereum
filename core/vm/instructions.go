@@ -337,7 +337,9 @@ func opCallValue(pc *uint64, evm *EVM, contract *Contract, memory *Memory, stack
 }
 
 func opCalldataLoad(pc *uint64, evm *EVM, contract *Contract, memory *Memory, stack *Stack) ([]byte, error) {
-	stack.push(new(big.Int).SetBytes(getData(contract.Input, stack.pop(), common.Big32)))
+	tmp := stack.pop()
+	data := getData(contract.Input, tmp, common.Big32)
+	stack.push(new(big.Int).SetBytes(data))
 	return nil, nil
 }
 

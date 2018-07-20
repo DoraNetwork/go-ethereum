@@ -17,13 +17,13 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
 	"sort"
 	"sync"
 	"time"
-	"bytes"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
@@ -32,8 +32,9 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
-	"gopkg.in/karalabe/cookiejar.v2/collections/prque"
 	rpcClient "github.com/tendermint/tendermint/rpc/client"
+	"gopkg.in/karalabe/cookiejar.v2/collections/prque"
+	emtConfig "github.com/dora/ultron/node/config"
 )
 
 var (
@@ -99,9 +100,11 @@ var (
 	queuedNofundsCounter   = metrics.NewCounter("txpool/queued/nofunds")   // Dropped due to out-of-funds
 
 	// General tx metrics
-	invalidTxCounter     = metrics.NewCounter("txpool/invalid")
+	invalidTxCounter = metrics.NewCounter("txpool/invalid")
 	//underpricedTxCounter = metrics.NewCounter("txpool/underpriced")
 )
+
+var repeatTxTest = false
 
 type stateFn func() (*state.StateDB, error)
 
@@ -166,8 +169,8 @@ type TxPool struct {
 	eventMux     *event.TypeMux
 	events       *event.TypeMuxSubscription
 	//locals       *accountSet
-	signer       types.Signer
-	mu           sync.RWMutex
+	signer types.Signer
+	mu     sync.RWMutex
 
 	pending map[common.Address]*txList         // All currently processable transactions
 	queue   map[common.Address]*txList         // Queued but non-processable transactions
@@ -205,7 +208,7 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, eventMux *e
 		pendingState: nil,
 		events:       eventMux.Subscribe(ChainHeadEvent{}, RemovedTransactionEvent{}),
 		quit:         make(chan struct{}),
-		tmClient: 	  nil,
+		tmClient:     nil,
 	}
 	//pool.locals = newAccountSet(pool.signer)
 	pool.resetState()
@@ -214,6 +217,11 @@ func NewTxPool(config TxPoolConfig, chainconfig *params.ChainConfig, eventMux *e
 	pool.wg.Add(2)
 	go pool.eventLoop()
 	go pool.expirationLoop()
+
+	testConfig, _ := emtConfig.ParseConfig()
+	if (testConfig != nil && testConfig.TestConfig.RepeatTxTest) {
+		repeatTxTest = true
+	}
 
 	return pool
 }
@@ -258,12 +266,18 @@ func (pool *TxPool) eventLoop() {
 			pending, queued := pool.stats()
 			pool.mu.RUnlock()
 
-			if pending != prevPending || queued != prevQueued  {
+			if pending != prevPending || queued != prevQueued {
 				log.Debug("Transaction pool status report", "executable", pending, "queued", queued)
 				prevPending, prevQueued = pending, queued
 			}
 		}
 	}
+}
+
+func (pool *TxPool) OnChainHeadEvent() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.resetState()
 }
 
 func (pool *TxPool) resetState() {
@@ -278,7 +292,11 @@ func (pool *TxPool) resetState() {
 	// any transactions that have been included in the block or
 	// have been invalidated because of another transaction (e.g.
 	// higher gas price)
+	fmt.Println("**********Before delete all size", len(pool.all), "pending", len(pool.pending), 
+		"queue", len(pool.queue))
 	pool.demoteUnexecutables(currentState)
+	fmt.Println("**********After delete all size", len(pool.all), "pending", len(pool.pending), 
+		"queue", len(pool.queue))
 
 	// Update all accounts to the latest known pending nonce
 	for addr, list := range pool.pending {
@@ -288,6 +306,7 @@ func (pool *TxPool) resetState() {
 	// Check the queue and move transactions over to the pending if possible
 	// or remove those that have become invalid
 	pool.promoteExecutables(currentState, nil)
+	fmt.Println("txpool reset state done")
 }
 
 // Stop terminates the transaction pool.
@@ -414,12 +433,15 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	if err != nil {
 		return err
 	}
-	if currentState.GetNonce(from) > tx.Nonce() {
-		return ErrNonceTooLow
+	if (!repeatTxTest) {
+		if currentState.GetNonce(from) > tx.Nonce() {
+			return ErrNonceTooLow
+		}
 	}
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
 	if currentState.GetBalance(from).Cmp(tx.Cost()) < 0 {
+		fmt.Println("Discarding low balance transaction")
 		return ErrInsufficientFunds
 	}
 	intrGas := IntrinsicGas(tx.Data(), tx.To() == nil, pool.homestead)
@@ -441,6 +463,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	// If the transaction is already known, discard it
 	hash := tx.Hash()
 	if pool.all[hash] != nil {
+		fmt.Println("Discarding already known transaction", "hash", hash)
 		log.Trace("Discarding already known transaction", "hash", hash)
 		return false, fmt.Errorf("known transaction: %x", hash)
 	}
@@ -712,10 +735,12 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 		}
 		// Drop all transactions that are deemed too old (low nonce)
 		// 删除nonce值太低txs
-		for _, tx := range list.Forward(state.GetNonce(addr)) {
-			hash := tx.Hash()
-			log.Trace("Removed old queued transaction", "hash", hash)
-			delete(pool.all, hash)
+		if (!repeatTxTest) {
+			for _, tx := range list.Forward(state.GetNonce(addr)) {
+				hash := tx.Hash()
+				log.Trace("Removed old queued transaction", "hash", hash)
+				delete(pool.all, hash)
+			}
 		}
 		// Drop all transactions that are too costly (low balance or out of gas)
 		// 删除花费太高的txs
@@ -728,7 +753,11 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 		}
 		// Gather all executable transactions and promote them
 		// TODO: 区分state与pendingState中的nonce值
-		for _, tx := range list.Ready(pool.pendingState.GetNonce(addr)) {
+		startNonce := pool.pendingState.GetNonce(addr)
+		if (repeatTxTest) {
+			startNonce = (uint64)(9999999999999999999)
+		}
+		for _, tx := range list.Ready(startNonce) {
 			hash := tx.Hash()
 			log.Trace("Promoting queued transaction", "hash", hash)
 			// TODO: 剩余的tx怎么处理？？？
@@ -879,7 +908,11 @@ func (pool *TxPool) demoteUnexecutables(state *state.StateDB) {
 		nonce := state.GetNonce(addr)
 
 		// Drop all transactions that are deemed too old (low nonce)
-		for _, tx := range list.Forward(nonce) {
+		endNonce := nonce
+		if (repeatTxTest) {
+			endNonce = nonce + 2	// TODO: there is an issue that nonce haven't added after applyTransaction
+		}
+		for _, tx := range list.Forward(endNonce) {
 			hash := tx.Hash()
 			log.Trace("Removed old pending transaction", "hash", hash)
 			delete(pool.all, hash)
@@ -948,7 +981,7 @@ func (pool *TxPool) broadcastTx(tx *types.Transaction) error {
 	if err := tx.EncodeRLP(buf); err != nil {
 		return err
 	}
-	result, err := pool.tmClient.BroadcastTxSync(buf.Bytes())
+	result, err := pool.tmClient.BroadcastTxSync(buf.Bytes(), 1)
 	if err != nil {
 		log.Trace("Broadcast error", "err", err)
 		return ErrBroadcastTX

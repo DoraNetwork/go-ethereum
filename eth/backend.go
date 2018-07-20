@@ -47,6 +47,8 @@ import (
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
+
+	emtConfig "github.com/dora/ultron/node/config"
 )
 
 type LesServer interface {
@@ -173,6 +175,12 @@ func New(ctx *node.ServiceContext, config *Config, pending miner.Pending) (*Ethe
 	}
 
 	eth.ApiBackend = &EthApiBackend{eth, nil, pending}
+	testConfig, _ := emtConfig.ParseConfig()
+	if (testConfig != nil && testConfig.TestConfig.RepeatTxTest) {
+		if (testConfig.TestConfig.TxMultiAccount) {
+			eth.ApiBackend.Init(ctx.ResolvePath("large_txs.txt"))
+		}
+	}
 	gpoParams := config.GPO
 	if gpoParams.Default == nil {
 		gpoParams.Default = config.GasPrice

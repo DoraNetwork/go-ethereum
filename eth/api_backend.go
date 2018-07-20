@@ -17,8 +17,14 @@
 package eth
 
 import (
+	"time"
 	"context"
 	"math/big"
+	"os"
+	"encoding/binary"
+	"bytes"
+	"fmt"
+	// "runtime/pprof"	 // 引用pprof package
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -34,7 +40,12 @@ import (
 	"github.com/ethereum/go-ethereum/miner"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethereum/go-ethereum/rlp"
+
+	emtConfig "github.com/dora/ultron/node/config"
 )
+
+var repeatSendSleep = (uint)(0)
 
 // EthApiBackend implements ethapi.Backend for full nodes
 type EthApiBackend struct {
@@ -116,6 +127,68 @@ func (b *EthApiBackend) GetEVM(ctx context.Context, msg core.Message, state *sta
 	context := core.NewEVMContext(msg, header, b.eth.BlockChain(), nil)
 	return vm.NewEVM(context, state, b.eth.chainConfig, vmCfg), vmError, nil
 }
+
+var data = make([]byte, 21907644)
+func (b *EthApiBackend) Init(dir string) {
+	f, err := os.Open(dir)
+	if err != nil {
+	}
+	//data := make([]byte, 5650000)
+	// data := make([]byte, 21907644)
+	_, err = f.Read(data)
+	if err != nil {
+	}
+	testConfig, _ := emtConfig.ParseConfig()
+	if (testConfig != nil) {
+		repeatSendSleep = testConfig.TestConfig.RepeastSendSleep
+	}
+	go b.RepeatSendTx()
+}
+
+// rlp decode an etherum transaction
+func (b *EthApiBackend) decodeTx(txBytes []byte) (*types.Transaction, error) {
+	tx := new(types.Transaction)
+	rlpStream := rlp.NewStream(bytes.NewBuffer(txBytes), 0)
+	if err := tx.DecodeRLP(rlpStream); err != nil {
+			return nil, err
+	}
+	return tx, nil
+}
+
+func (b *EthApiBackend) RepeatSendTx() {
+	time.Sleep(time.Second * 5)
+	// f, _ := os.Create("profile_file")
+	// pprof.StartCPUProfile(f)  // 开始cpu profile，结果写到文件f中
+	// defer pprof.StopCPUProfile()  // 结束profile
+
+	for {
+		var read = 0
+		var txLen = 0
+		for i := 0; i < 50000; i++ {
+			buf := data[read:read+8]
+			l := int64(binary.BigEndian.Uint64(buf))
+			tx := data[read+8:read+8+int(l)]
+			read = read+8+int(l)
+			decoded_tx, _ := b.decodeTx(tx)
+			if (decoded_tx == nil) {
+				break
+			}
+			err := b.eth.txPool.AddLocal(decoded_tx)
+			if (err != nil) {
+				fmt.Println("Repeat Send Tx err", err)
+				time.Sleep(time.Microsecond*100)
+				continue
+			}
+			txLen = txLen + 1
+			if (repeatSendSleep > 0) {
+				time.Sleep((time.Duration)(repeatSendSleep) * time.Millisecond)
+			}
+		}
+		fmt.Println("send total tx count", txLen)
+		// time.Sleep(time.Second)
+	}
+}
+
 
 func (b *EthApiBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
 	return b.eth.txPool.AddLocal(signedTx)
