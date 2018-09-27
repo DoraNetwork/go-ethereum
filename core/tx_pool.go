@@ -468,19 +468,23 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 // whitelisted, preventing any associated transaction from being dropped out of
 // the pool due to pricing constraints.
 func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
-	// If the transaction is already known, discard it
-	hash := tx.Hash()
-	if pool.all[hash] != nil {
-		fmt.Println("Discarding already known transaction", "hash", hash)
-		log.Trace("Discarding already known transaction", "hash", hash)
-		return false, fmt.Errorf("known transaction: %x", hash)
-	}
 	// If the transaction fails basic validation, discard it
+	hash := tx.Hash()
 	if err := pool.validateTx(tx, local); err != nil {
 		log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
 		invalidTxCounter.Inc(1)
 		return false, err
 	}
+	
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	// If the transaction is already known, discard it
+	if pool.all[hash] != nil {
+		fmt.Println("Discarding already known transaction", "hash", hash)
+		log.Trace("Discarding already known transaction", "hash", hash)
+		return false, fmt.Errorf("known transaction: %x", hash)
+	}
+
 	// If the transaction pool is full, discard underpriced transactions
 	if uint64(len(pool.all)) >= pool.config.GlobalSlots+pool.config.GlobalQueue {
 		log.Trace("Discarding transaction as there is no room for it", "hash", hash)
@@ -605,9 +609,6 @@ func (pool *TxPool) AddRemotes(txs []*types.Transaction) error {
 
 // addTx enqueues a single transaction into the pool if it is valid.
 func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-
 	// Try to inject the transaction and update any state
 	replace, err := pool.add(tx, local)
 	if err != nil {
@@ -623,6 +624,8 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 		if err != nil {
 			return err
 		}
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
 		// from, _ := types.Sender(pool.signer, tx) // already validated
 		from, _ := tx.From(pool.signer) // validate in future, in exec thread.
 		return pool.promoteExecutables(state, []common.Address{from})

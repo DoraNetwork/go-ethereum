@@ -121,9 +121,9 @@ func newTransaction(nonce uint64, to *common.Address, amount, gasLimit, gasPrice
 
 // From returns the tx sender according to signer
 func (tx *Transaction) From(signer Signer) (common.Address, error) {
-	if tx.data.From != nil {
-		return *tx.data.From, nil
-	}
+	// if tx.data.From != nil {
+	// 	return *tx.data.From, nil
+	// }
 	return Sender(signer, tx)
 }
 
