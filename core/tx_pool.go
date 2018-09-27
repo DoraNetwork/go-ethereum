@@ -172,10 +172,12 @@ type TxPool struct {
 	signer types.Signer
 	mu     sync.RWMutex
 
-	pending map[common.Address]*txList         // All currently processable transactions
-	queue   map[common.Address]*txList         // Queued but non-processable transactions
-	beats   map[common.Address]time.Time       // Last heartbeat from each known account
-	all     map[common.Hash]*types.Transaction // All transactions to allow lookups
+	pending 		map[common.Address]*txList         	// All currently processable transactions
+	pendingVolume	uint64						   		// Item count in pending
+	queue   		map[common.Address]*txList         	// Queued but non-processable transactions
+	queueVolume		uint64								// Item count in queue
+	beats   		map[common.Address]time.Time       	// Last heartbeat from each known account
+	all     		map[common.Hash]*types.Transaction 	// All transactions to allow lookups
 	//priced  *txPricedList                      // All transactions sorted by price
 
 	wg   sync.WaitGroup // for shutdown sync
@@ -318,6 +320,11 @@ func (pool *TxPool) Stop() {
 	log.Info("Transaction pool stopped")
 }
 
+// Signer terminates the transaction pool.
+func (pool *TxPool) Signer() types.Signer {
+	return pool.signer
+}
+
 // GasPrice returns the current gas price enforced by the transaction pool.
 func (pool *TxPool) GasPrice() *big.Int {
 	pool.mu.RLock()
@@ -419,7 +426,8 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 		return ErrGasLimit
 	}
 	// Make sure the transaction is signed properly
-	from, err := types.Sender(pool.signer, tx)
+	// from, err := types.Sender(pool.signer, tx)
+	from, err := tx.From(pool.signer)
 	if err != nil {
 		return ErrInvalidSender
 	}
@@ -479,7 +487,8 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 		return false, fmt.Errorf("Discarding transaction as there is no room for it: %x", hash)
 	}
 	// If the transaction is replacing an already pending one, return error
-	from, _ := types.Sender(pool.signer, tx) // already validated
+	// from, _ := types.Sender(pool.signer, tx) // already validated
+	from, _ := tx.From(pool.signer)
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, can not be replaced
 		return false, ErrNonceNotReplaced
@@ -501,7 +510,8 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 // Note, this method assumes the pool lock is held!
 func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, error) {
 	// Try to insert the transaction into the future queue
-	from, _ := types.Sender(pool.signer, tx) // already validated
+	// from, _ := types.Sender(pool.signer, tx) // already validated
+	from, _ := tx.From(pool.signer) // validate from in execution thread
 	if pool.queue[from] == nil {
 		pool.queue[from] = newTxList(false)
 	}
@@ -515,6 +525,8 @@ func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, er
 	if old != nil {
 		delete(pool.all, old.Hash())
 		queuedReplaceCounter.Inc(1)
+	} else {
+		pool.queueVolume++
 	}
 	pool.all[hash] = tx
 	return old != nil, nil
@@ -545,6 +557,8 @@ func (pool *TxPool) promoteTx(addr common.Address, hash common.Hash, tx *types.T
 		delete(pool.all, old.Hash())
 
 		pendingReplaceCounter.Inc(1)
+	} else {
+		pool.pendingVolume++
 	}
 	// Failsafe to work around direct pending inserts (tests)
 	if pool.all[hash] == nil {
@@ -609,7 +623,8 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 		if err != nil {
 			return err
 		}
-		from, _ := types.Sender(pool.signer, tx) // already validated
+		// from, _ := types.Sender(pool.signer, tx) // already validated
+		from, _ := tx.From(pool.signer) // validate in future, in exec thread.
 		return pool.promoteExecutables(state, []common.Address{from})
 	}
 	return nil
@@ -625,7 +640,7 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) error {
 	for _, tx := range txs {
 		if replace, err := pool.add(tx, local); err == nil {
 			if !replace {
-				from, _ := types.Sender(pool.signer, tx) // already validated
+				from, _ := tx.From(pool.signer) // already validated
 				dirty[from] = struct{}{}
 			}
 		}
@@ -680,7 +695,7 @@ func (pool *TxPool) removeTx(hash common.Hash) {
 	if !ok {
 		return
 	}
-	addr, _ := types.Sender(pool.signer, tx) // already validated during insertion
+	addr, _ := tx.From(pool.signer) // already validated during insertion
 
 	// Remove it from the list of known transactions
 	delete(pool.all, hash)
@@ -688,6 +703,7 @@ func (pool *TxPool) removeTx(hash common.Hash) {
 	// Remove the transaction from the pending lists and reset the account nonce
 	if pending := pool.pending[addr]; pending != nil {
 		if removed, invalids := pending.Remove(tx); removed {
+			pool.pendingVolume--
 			// If no more transactions are left, remove the list
 			if pending.Empty() {
 				delete(pool.pending, addr)
@@ -708,6 +724,7 @@ func (pool *TxPool) removeTx(hash common.Hash) {
 	// Transaction is in the future queue
 	if future := pool.queue[addr]; future != nil {
 		future.Remove(tx)
+		pool.queueVolume--
 		if future.Empty() {
 			delete(pool.queue, addr)
 		}
@@ -740,6 +757,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 				hash := tx.Hash()
 				log.Trace("Removed old queued transaction", "hash", hash)
 				delete(pool.all, hash)
+				pool.queueVolume--
 			}
 		}
 		// Drop all transactions that are too costly (low balance or out of gas)
@@ -750,6 +768,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 			log.Trace("Removed unpayable queued transaction", "hash", hash)
 			delete(pool.all, hash)
 			queuedNofundsCounter.Inc(1)
+			pool.queueVolume--
 		}
 		// Gather all executable transactions and promote them
 		// TODO: 区分state与pendingState中的nonce值
@@ -764,7 +783,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 			if err := pool.promoteTx(addr, hash, tx); err != nil {
 				return err
 			}
-
+			pool.queueVolume--
 		}
 		// Drop all transactions over the allowed limit
 		//if !pool.locals.contains(addr) {
@@ -785,20 +804,21 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 	// TODO: 前面做了拦截，这里的两个逻辑是不是多余了？
 	// If the pending limit is overflown, start equalizing allowances
 	// 首先对pending的检查
-	pending := uint64(0)
-	for _, list := range pool.pending {
-		pending += uint64(list.Len())
-	}
+	pending := pool.pendingVolume
+	// for _, list := range pool.pending {
+	// 	pending += uint64(list.Len())
+	// }
 	if pending > pool.config.GlobalSlots {
 		pendingBeforeCap := pending
 		// Assemble a spam order to penalize large transactors first
 		spammers := prque.New()
-		//for addr, list := range pool.pending {
-		//	// Only evict transactions from high rollers
-		//	if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.AccountSlots {
-		//		spammers.Push(addr, float32(list.Len()))
-		//	}
-		//}
+		for addr, list := range pool.pending {
+			// Only evict transactions from high rollers
+			// if !pool.locals.contains(addr) && uint64(list.Len()) > pool.config.AccountSlots {
+			if uint64(list.Len()) > pool.config.AccountSlots {
+				spammers.Push(addr, float32(list.Len()))
+			}
+		}
 		// Gradually drop transactions from offenders
 		offenders := []common.Address{}
 		for pending > pool.config.GlobalSlots && !spammers.Empty() {
@@ -820,6 +840,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 							hash := tx.Hash()
 							delete(pool.all, hash)
 
+							pool.pendingVolume--
 							// Update the account nonce to the dropped transaction
 							if nonce := tx.Nonce(); pool.pendingState.GetNonce(offenders[i]) > nonce {
 								pool.pendingState.SetNonce(offenders[i], nonce)
@@ -841,6 +862,7 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 						hash := tx.Hash()
 						delete(pool.all, hash)
 
+						pool.pendingVolume--
 						// Update the account nonce to the dropped transaction
 						if nonce := tx.Nonce(); pool.pendingState.GetNonce(addr) > nonce {
 							pool.pendingState.SetNonce(addr, nonce)
@@ -855,18 +877,19 @@ func (pool *TxPool) promoteExecutables(state *state.StateDB, accounts []common.A
 	}
 	// If we've queued more transactions than the hard limit, drop oldest ones
 	// 然后对future queue的检查
-	queued := uint64(0)
-	for _, list := range pool.queue {
-		queued += uint64(list.Len())
-	}
+	queued := pool.queueVolume
+	// for _, list := range pool.queue {
+	// 	queued += uint64(list.Len())
+	// }
 	if queued > pool.config.GlobalQueue {
 		// Sort all accounts with queued transactions by heartbeat
 		addresses := make(addresssByHeartbeat, 0, len(pool.queue))
-		//for addr := range pool.queue {
-		//	if !pool.locals.contains(addr) { // don't drop locals
-		//		addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
-		//	}
-		//}
+		for addr := range pool.queue {
+			// if !pool.locals.contains(addr) { // don't drop locals
+			// 	addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
+			// }
+			addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
+		}
 		sort.Sort(addresses)
 
 		// Drop transactions until the total is below the limit or only locals remain
@@ -916,6 +939,7 @@ func (pool *TxPool) demoteUnexecutables(state *state.StateDB) {
 			hash := tx.Hash()
 			log.Trace("Removed old pending transaction", "hash", hash)
 			delete(pool.all, hash)
+			pool.pendingVolume--
 		}
 		// Drop all transactions that are too costly (low balance or out of gas), and queue any invalids back for later
 		drops, invalids := list.Filter(state.GetBalance(addr), gaslimit)
@@ -924,6 +948,7 @@ func (pool *TxPool) demoteUnexecutables(state *state.StateDB) {
 			log.Trace("Removed unpayable pending transaction", "hash", hash)
 			delete(pool.all, hash)
 			pendingNofundsCounter.Inc(1)
+			pool.pendingVolume--
 		}
 		for _, tx := range invalids {
 			hash := tx.Hash()

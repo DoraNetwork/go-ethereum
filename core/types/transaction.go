@@ -61,6 +61,7 @@ type txdata struct {
 	Recipient    *common.Address `json:"to"       rlp:"nil"` // nil means contract creation
 	Amount       *big.Int        `json:"value"    gencodec:"required"`
 	Payload      []byte          `json:"input"    gencodec:"required"`
+	From		 *common.Address `json:"from"     gencodec:"required"`
 
 	// Signature values
 	V *big.Int `json:"v" gencodec:"required"`
@@ -116,6 +117,14 @@ func newTransaction(nonce uint64, to *common.Address, amount, gasLimit, gasPrice
 	}
 
 	return &Transaction{data: d}
+}
+
+// From returns the tx sender according to signer
+func (tx *Transaction) From(signer Signer) (common.Address, error) {
+	if tx.data.From != nil {
+		return *tx.data.From, nil
+	}
+	return Sender(signer, tx)
 }
 
 // ChainId returns which chain id this transaction was signed for (if at all)
@@ -242,7 +251,8 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 	}
 
 	var err error
-	msg.from, err = Sender(s, tx)
+	// msg.from, err = Sender(s, tx)
+	msg.from, err = tx.From(s)
 	return msg, err
 }
 
@@ -418,7 +428,8 @@ func (t *TransactionsByPriceAndNonce) Peek() *Transaction {
 func (t *TransactionsByPriceAndNonce) Shift() {
 	signer := deriveSigner(t.heads[0].data.V)
 	// derive signer but don't cache.
-	acc, _ := Sender(signer, t.heads[0]) // we only sort valid txs so this cannot fail
+	// acc, _ := Sender(signer, t.heads[0]) // we only sort valid txs so this cannot fail
+	acc, _ := t.heads[0].From(signer) // we only sort valid txs so this cannot fail
 	if txs, ok := t.txs[acc]; ok && len(txs) > 0 {
 		t.heads[0], t.txs[acc] = txs[0], txs[1:]
 		heap.Fix(&t.heads, 0)
