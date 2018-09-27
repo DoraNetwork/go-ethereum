@@ -52,11 +52,11 @@ var (
 )
 
 const (
-	bodyCacheLimit      = 256
-	blockCacheLimit     = 256
-	maxFutureBlocks     = 256
-	maxTimeFutureBlocks = 30
-	badBlockLimit       = 10
+	bodyCacheLimit      = 8
+	blockCacheLimit     = 8
+	maxFutureBlocks     = 8
+	maxTimeFutureBlocks = 8
+	badBlockLimit       = 8
 
 	// BlockChainVersion ensures that an incompatible database forces a resync from scratch.
 	BlockChainVersion = 3
