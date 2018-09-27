@@ -427,7 +427,7 @@ func (pool *TxPool) validateTx(tx *types.Transaction, local bool) error {
 	}
 	// Make sure the transaction is signed properly
 	// from, err := types.Sender(pool.signer, tx)
-	from, err := tx.From(pool.signer)
+	from, err := tx.From(pool.signer, true)
 	if err != nil {
 		return ErrInvalidSender
 	}
@@ -492,7 +492,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 	}
 	// If the transaction is replacing an already pending one, return error
 	// from, _ := types.Sender(pool.signer, tx) // already validated
-	from, _ := tx.From(pool.signer)
+	from, _ := tx.From(pool.signer, false)
 	if list := pool.pending[from]; list != nil && list.Overlaps(tx) {
 		// Nonce already pending, can not be replaced
 		return false, ErrNonceNotReplaced
@@ -515,7 +515,7 @@ func (pool *TxPool) add(tx *types.Transaction, local bool) (bool, error) {
 func (pool *TxPool) enqueueTx(hash common.Hash, tx *types.Transaction) (bool, error) {
 	// Try to insert the transaction into the future queue
 	// from, _ := types.Sender(pool.signer, tx) // already validated
-	from, _ := tx.From(pool.signer) // validate from in execution thread
+	from, _ := tx.From(pool.signer, false) // validate from in execution thread
 	if pool.queue[from] == nil {
 		pool.queue[from] = newTxList(false)
 	}
@@ -627,7 +627,7 @@ func (pool *TxPool) addTx(tx *types.Transaction, local bool) error {
 		pool.mu.Lock()
 		defer pool.mu.Unlock()
 		// from, _ := types.Sender(pool.signer, tx) // already validated
-		from, _ := tx.From(pool.signer) // validate in future, in exec thread.
+		from, _ := tx.From(pool.signer, false) // already validated
 		return pool.promoteExecutables(state, []common.Address{from})
 	}
 	return nil
@@ -643,7 +643,7 @@ func (pool *TxPool) addTxs(txs []*types.Transaction, local bool) error {
 	for _, tx := range txs {
 		if replace, err := pool.add(tx, local); err == nil {
 			if !replace {
-				from, _ := tx.From(pool.signer) // already validated
+				from, _ := tx.From(pool.signer, false) // already validated
 				dirty[from] = struct{}{}
 			}
 		}
@@ -698,7 +698,7 @@ func (pool *TxPool) removeTx(hash common.Hash) {
 	if !ok {
 		return
 	}
-	addr, _ := tx.From(pool.signer) // already validated during insertion
+	addr, _ := tx.From(pool.signer, false) // already validated during insertion
 
 	// Remove it from the list of known transactions
 	delete(pool.all, hash)

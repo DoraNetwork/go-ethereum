@@ -120,10 +120,11 @@ func newTransaction(nonce uint64, to *common.Address, amount, gasLimit, gasPrice
 }
 
 // From returns the tx sender according to signer
-func (tx *Transaction) From(signer Signer) (common.Address, error) {
-	// if tx.data.From != nil {
-	// 	return *tx.data.From, nil
-	// }
+func (tx *Transaction) From(signer Signer, strict bool) (common.Address, error) {
+	// if strict mode, always call sender to verify.
+	if !strict && tx.data.From != nil {
+		return *tx.data.From, nil
+	}
 	return Sender(signer, tx)
 }
 
@@ -252,7 +253,8 @@ func (tx *Transaction) AsMessage(s Signer) (Message, error) {
 
 	var err error
 	// msg.from, err = Sender(s, tx)
-	msg.from, err = tx.From(s)
+	// Either ethereum or ethermint call this, in either case, this tx's From should be valid.
+	msg.from, err = tx.From(s, false)
 	return msg, err
 }
 
@@ -429,7 +431,7 @@ func (t *TransactionsByPriceAndNonce) Shift() {
 	signer := deriveSigner(t.heads[0].data.V)
 	// derive signer but don't cache.
 	// acc, _ := Sender(signer, t.heads[0]) // we only sort valid txs so this cannot fail
-	acc, _ := t.heads[0].From(signer) // we only sort valid txs so this cannot fail
+	acc, _ := t.heads[0].From(signer, false) // we only sort valid txs so this cannot fail
 	if txs, ok := t.txs[acc]; ok && len(txs) > 0 {
 		t.heads[0], t.txs[acc] = txs[0], txs[1:]
 		heap.Fix(&t.heads, 0)

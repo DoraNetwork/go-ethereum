@@ -62,7 +62,13 @@ func SignTx(tx *Transaction, s Signer, prv *ecdsa.PrivateKey) (*Transaction, err
 	if err != nil {
 		return nil, err
 	}
-	return s.WithSignature(tx, sig)
+	signedTx, err := s.WithSignature(tx, sig)
+
+	// fill from addr of signed Tx
+	addr := crypto.PubkeyToAddress(prv.PublicKey)
+	signedTx.data.From = &addr
+	signedTx.from.Store(sigCache{signer: s, from: addr})
+	return signedTx, err
 }
 
 // Sender derives the sender from the tx using the signer derivation
