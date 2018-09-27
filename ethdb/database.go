@@ -60,21 +60,27 @@ func NewLDBDatabase(file string, cache int, handles int) (*LDBDatabase, error) {
 	logger := log.New("database", file)
 
 	// Ensure we have some minimal caching and file guarantees
-	if cache < 16 {
-		cache = 16
+	if cache < 2048 {
+		cache = 2048
 	}
-	if handles < 16 {
-		handles = 16
+	if handles < 128 {
+		handles = 128
 	}
 	logger.Info("Allocated cache and file handles", "cache", cache, "handles", handles)
 
 	// Open the db and recover any potential corruptions
 	db, err := leveldb.OpenFile(file, &opt.Options{
-		OpenFilesCacheCapacity: handles,
-		BlockCacheCapacity:     cache / 2 * opt.MiB,
-		WriteBuffer:            cache / 4 * opt.MiB, // Two of these are used internally
-		Filter:                 filter.NewBloomFilter(10),
+		OpenFilesCacheCapacity:			handles,
+		BlockCacheCapacity:    			cache / 2 * opt.MiB,
+		WriteBuffer:           			cache / 4 * opt.MiB, // Two of these are used internally
+		Filter:                			filter.NewBloomFilter(10),
+		BlockSize:                      16 * opt.MiB,
+		CompactionL0Trigger:            4,
+		CompactionTableSize:            32 * opt.MiB,
+		CompactionTotalSize:            256 * opt.MiB,
+		CompactionTableSizeMultiplier:  4,
 	})
+
 	if _, corrupted := err.(*errors.ErrCorrupted); corrupted {
 		db, err = leveldb.RecoverFile(file, nil)
 	}
